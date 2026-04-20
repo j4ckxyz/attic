@@ -1,0 +1,23 @@
+{
+  "name": "attic",
+  "module": "src/cli.ts",
+  "bin": {
+    "attic": "src/cli.ts"
+  },
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "attic": "bun run src/cli.ts",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@atproto/api": "^0.19.9",
+    "hono": "^4.12.14"
+  }
+}
