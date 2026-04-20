@@ -2,16 +2,35 @@ import { Hono } from "hono";
 import type { AtticDatabase } from "./db";
 import { SearchService } from "./search";
 import type { PostRow } from "./types";
-import { getSyncStatus, runSingleSync } from "./sync-worker";
+import { getSyncStatus, runSingleSync, startSyncWorker } from "./sync-worker";
+import { AvatarCacher } from "./avatars";
 
 const uiScript = await Bun.file(new URL("./web/app.js", import.meta.url)).text();
+
+const avatarCacher = new AvatarCacher();
 
 export type ServerOptions = {
   host?: string;
   port?: number;
   pageSize?: number;
   openBrowser?: boolean;
+  syncInterval?: number;
 };
+
+function rewriteAvatarUrls(items: PostRow[]): PostRow[] {
+  return items.map((item) => {
+    if (!item.avatarUrl) {
+      return item;
+    }
+
+    const filename = item.avatarUrl.split("/").pop();
+    if (filename && filename.startsWith("did:")) {
+      return { ...item, avatarUrl: item.avatarUrl };
+    }
+
+    return { ...item, avatarUrl: item.avatarUrl };
+  });
+}
 
 export function createApp(db: AtticDatabase, pageSize = 50): Hono {
   const app = new Hono();
@@ -24,15 +43,29 @@ export function createApp(db: AtticDatabase, pageSize = 50): Hono {
     return c.body(uiScript);
   });
 
+  app.get("/avatars/:filename", (c) => {
+    const filename = c.req.param("filename");
+    const data = avatarCacher.serveAvatar(filename);
+    if (!data) {
+      return c.notFound();
+    }
+
+    c.header("content-type", avatarCacher.getContentType(filename));
+    c.header("cache-control", "public, max-age=86400");
+    return c.body(data);
+  });
+
   app.get("/api/feed", (c) => {
     const page = Number(c.req.query("page") ?? "1");
-    const items = db.listFeed(Math.max(page, 1), pageSize);
+    const items = rewriteAvatarUrls(db.listFeed(Math.max(page, 1), pageSize));
     return c.json({ items, page, pageSize });
   });
 
   app.get("/api/bookmarks", (c) => {
     const page = Number(c.req.query("page") ?? "1");
-    const items = db.listBookmarks(Math.max(page, 1), pageSize);
+    const items = rewriteAvatarUrls(
+      db.listBookmarks(Math.max(page, 1), pageSize),
+    );
     return c.json({ items, page, pageSize });
   });
 
@@ -49,10 +82,13 @@ export function createApp(db: AtticDatabase, pageSize = 50): Hono {
   app.get("/api/threads", (c) => {
     const page = Number(c.req.query("page") ?? "1");
     const summaries = db.listThreadSummaries(Math.max(page, 1), pageSize);
-    const items = summaries.map((summary) => ({
-      ...summary,
-      rootPost: db.getPostByUri(summary.threadRootUri),
-    }));
+    const items = summaries.map((summary) => {
+      const rootPost = db.getPostByUri(summary.threadRootUri);
+      return {
+        ...summary,
+        rootPost: rootPost ? rewriteAvatarUrls([rootPost])[0] : null,
+      };
+    });
 
     return c.json({ items, page, pageSize });
   });
@@ -63,7 +99,7 @@ export function createApp(db: AtticDatabase, pageSize = 50): Hono {
       return c.json({ error: "rootUri is required" }, 400);
     }
 
-    const posts = db.getThreadPosts(rootUri);
+    const posts = rewriteAvatarUrls(db.getThreadPosts(rootUri));
     const tree = buildThreadTree(posts);
     return c.json({ rootUri, posts, tree });
   });
@@ -75,13 +111,15 @@ export function createApp(db: AtticDatabase, pageSize = 50): Hono {
     const to = c.req.query("to");
     const page = Number(c.req.query("page") ?? "1");
 
-    const items = search.search(query, {
-      authorHandle: authorHandle || undefined,
-      from: from || undefined,
-      to: to || undefined,
-      limit: pageSize,
-      offset: (Math.max(page, 1) - 1) * pageSize,
-    });
+    const items = rewriteAvatarUrls(
+      search.search(query, {
+        authorHandle: authorHandle || undefined,
+        from: from || undefined,
+        to: to || undefined,
+        limit: pageSize,
+        offset: (Math.max(page, 1) - 1) * pageSize,
+      }),
+    );
 
     return c.json({
       items,
@@ -129,6 +167,13 @@ export function startServer(
     port,
     fetch: app.fetch,
   });
+
+  // Start sync worker if interval specified
+  if (options.syncInterval) {
+    startSyncWorker(db, {
+      intervalMinutes: options.syncInterval,
+    });
+  }
 
   if (options.openBrowser ?? true) {
     const url = `http://${host}:${port}`;

@@ -1,6 +1,6 @@
-import { AtticDatabase } from "./db";
+import type { AtticDatabase } from "./db";
 import { runSync, type SyncStats } from "./sync";
-import { getConfig } from "./config";
+import { AvatarCacher } from "./avatars";
 
 type SyncState = "idle" | "running" | "error";
 
@@ -44,6 +44,10 @@ export async function runSingleSync(
     return null;
   }
 
+  if (db.isClosed) {
+    return null;
+  }
+
   syncInProgress = true;
   currentStatus = "running";
   const startTime = Date.now();
@@ -54,11 +58,18 @@ export async function runSingleSync(
       onProgress: (message) => console.log(`[sync] ${message}`),
     });
 
+    // Cache avatars for newly seen authors
+    const avatarCacher = new AvatarCacher();
+    const cached = await avatarCacher.cacheAvatars(db);
+    if (cached > 0) {
+      console.log(`[sync] cached ${cached} avatars`);
+    }
+
     const durationMs = Date.now() - startTime;
     const entry: SyncLogEntry = {
       timestamp: new Date().toISOString(),
       status: "success",
-      message: `Synced ${stats.repoPostsSaved} repo posts, ${stats.timelinePostsSaved} timeline posts`,
+      message: `Synced ${stats.timelinePostsSaved} posts, ${cached} avatars cached`,
       stats,
       durationMs,
     };
@@ -73,7 +84,7 @@ export async function runSingleSync(
     lastError = null;
 
     console.log(
-      `[sync] Complete in ${durationMs}ms: ${stats.followsCount} follows, ${stats.repoPostsSaved} repo posts, ${stats.timelinePostsSaved} timeline posts, ${stats.followedThreadsFound} threads`,
+      `[sync] Complete in ${durationMs}ms: ${stats.timelinePostsSaved} posts, ${stats.followedThreadsFound} threads`,
     );
 
     return stats;
@@ -142,6 +153,9 @@ export function startSyncWorker(
 export async function runSyncWorkerCli(
   intervalMinutes: number = 15,
 ): Promise<void> {
+  const { getConfig } = await import("./config");
+  const { AtticDatabase } = await import("./db");
+
   const config = getConfig();
   const db = new AtticDatabase(config.dbPath);
   db.init();

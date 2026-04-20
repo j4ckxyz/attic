@@ -153,8 +153,6 @@ async function runSyncCommand(parsed: ParsedArgs): Promise<void> {
     });
 
     console.log("Sync complete.");
-    console.log(`- Followed accounts: ${stats.followsCount}`);
-    console.log(`- Repo posts saved: ${stats.repoPostsSaved}`);
     console.log(`- Timeline posts saved: ${stats.timelinePostsSaved}`);
     console.log(`- Followed threads flagged: ${stats.followedThreadsFound}`);
   } finally {
@@ -166,19 +164,12 @@ async function runServeCommand(parsed: ParsedArgs): Promise<void> {
   const db = openDatabase();
   const config = getConfig();
 
-  // Start sync worker if interval specified
-  if (parsed.syncInterval) {
-    const { startSyncWorker } = await import("./sync-worker");
-    startSyncWorker(db, {
-      intervalMinutes: parsed.syncInterval,
-    });
-  }
-
   const server = startServer(db, {
     host: parsed.host,
     port: parsed.port,
     pageSize: config.pageSize,
     openBrowser: !parsed.noOpen,
+    syncInterval: parsed.syncInterval,
   });
 
   const url = `http://${server.host}:${server.port}`;

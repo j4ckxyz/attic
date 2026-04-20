@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync, existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type {
   AuthorRecord,
   PostRecordInput,
@@ -43,6 +43,7 @@ function toPostRow(row: PostRowDb): PostRow {
 
 export class AtticDatabase {
   private readonly db: Database;
+  private closed = false;
 
   constructor(dbPath: string) {
     if (dbPath !== ":memory:") {
@@ -61,6 +62,7 @@ export class AtticDatabase {
         handle TEXT NOT NULL,
         display_name TEXT,
         avatar_url TEXT,
+        avatar_cached INTEGER DEFAULT 0,
         updated_at TEXT NOT NULL
       );
 
@@ -130,7 +132,14 @@ export class AtticDatabase {
   }
 
   close(): void {
-    this.db.close();
+    if (!this.closed) {
+      this.closed = true;
+      this.db.close();
+    }
+  }
+
+  get isClosed(): boolean {
+    return this.closed;
   }
 
   upsertAuthor(author: AuthorRecord): void {
@@ -397,39 +406,29 @@ export class AtticDatabase {
     return rows.map(toPostRow);
   }
 
-  refreshFollowedThreads(followedDids: string[]): void {
-    const tx = this.db.transaction((dids: string[]) => {
-      this.db.query("DELETE FROM followed_threads").run();
+  refreshFollowedThreads(): void {
+    this.db.query("DELETE FROM followed_threads").run();
 
-      if (dids.length === 0) {
-        return;
-      }
-
-      const placeholders = dids.map(() => "?").join(", ");
-      this.db
-        .query(
-          `
-          INSERT INTO followed_threads (
-            thread_root_uri,
-            participant_count,
-            last_post_at,
-            updated_at
-          )
-          SELECT
-            thread_root_uri,
-            COUNT(DISTINCT author_did) AS participant_count,
-            MAX(timestamp) AS last_post_at,
-            ?
-          FROM posts
-          WHERE author_did IN (${placeholders})
-          GROUP BY thread_root_uri
-          HAVING COUNT(DISTINCT author_did) >= 3
-        `,
+    this.db
+      .query(
+        `
+        INSERT INTO followed_threads (
+          thread_root_uri,
+          participant_count,
+          last_post_at,
+          updated_at
         )
-        .run(new Date().toISOString(), ...dids);
-    });
-
-    tx(followedDids);
+        SELECT
+          thread_root_uri,
+          COUNT(DISTINCT author_did) AS participant_count,
+          MAX(timestamp) AS last_post_at,
+          ?
+        FROM posts
+        GROUP BY thread_root_uri
+        HAVING COUNT(DISTINCT author_did) >= 3
+      `,
+      )
+      .run(new Date().toISOString());
   }
 
   listThreadSummaries(page: number, pageSize: number): ThreadSummary[] {
@@ -488,6 +487,45 @@ export class AtticDatabase {
       .all(threadRootUri) as PostRowDb[];
 
     return rows.map(toPostRow);
+  }
+
+  getAuthorsNeedingAvatarCache(): Array<{
+    did: string;
+    avatarUrl: string | null;
+  }> {
+    return this.db
+      .query(
+        `
+        SELECT did, avatar_url
+        FROM authors
+        WHERE avatar_url IS NOT NULL
+          AND (avatar_cached IS NULL OR avatar_cached = 0)
+        LIMIT 50
+      `,
+      )
+      .all() as Array<{ did: string; avatar_url: string | null }>;
+  }
+
+  markAvatarCached(did: string): void {
+    this.db
+      .query(
+        "UPDATE authors SET avatar_cached = 1 WHERE did = ?",
+      )
+      .run(did);
+  }
+
+  postCount(): number {
+    const row = this.db
+      .query("SELECT COUNT(*) AS count FROM posts")
+      .get() as { count: number };
+    return row.count;
+  }
+
+  authorCount(): number {
+    const row = this.db
+      .query("SELECT COUNT(*) AS count FROM authors")
+      .get() as { count: number };
+    return row.count;
   }
 }
 
