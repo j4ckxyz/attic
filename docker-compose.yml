@@ -17,12 +17,30 @@ services:
       - ATTIC_DB_PATH=/app/data/attic.db
       - PORT=8787
       - HOST=0.0.0.0
+      - ATTIC_SYNC_INTERVAL=15
     healthcheck:
       test: ["CMD", "bun", "run", "src/cli.ts", "search", "health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
+
+  # Optional: standalone sync worker (use instead of built-in sync)
+  # attic-worker:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: attic-worker
+  #   restart: unless-stopped
+  #   volumes:
+  #     - attic-data:/app/data
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     - ATTIC_DB_PATH=/app/data/attic.db
+  #   command: ["bun", "run", "src/cli.ts", "worker", "--sync-interval", "15"]
+  #   depends_on:
+  #     - attic
 
 volumes:
   attic-data:

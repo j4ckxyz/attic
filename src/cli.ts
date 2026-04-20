@@ -4,9 +4,9 @@ import { getConfig } from "./config";
 import { AtticDatabase } from "./db";
 import { SearchService, formatSearchResults } from "./search";
 import { startServer } from "./server";
-import { runSync } from "./sync";
+import { runSyncWorkerCli } from "./sync-worker";
 
-type Command = "sync" | "serve" | "search" | "help";
+type Command = "sync" | "serve" | "search" | "worker" | "help";
 
 type ParsedArgs = {
   command: Command;
@@ -19,6 +19,7 @@ type ParsedArgs = {
   host?: string;
   port?: number;
   noOpen: boolean;
+  syncInterval?: number;
 };
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -26,7 +27,11 @@ function parseArgs(argv: string[]): ParsedArgs {
   const first = args.shift();
 
   const command: Command =
-    first === "sync" || first === "serve" || first === "search" || first === "help"
+    first === "sync" ||
+    first === "serve" ||
+    first === "search" ||
+    first === "worker" ||
+    first === "help"
       ? first
       : "help";
 
@@ -88,6 +93,14 @@ function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
 
+    if (token === "--sync-interval") {
+      const value = Number(args.shift() ?? "0");
+      if (Number.isFinite(value) && value > 0) {
+        parsed.syncInterval = value;
+      }
+      continue;
+    }
+
     if (parsed.command === "search" && !parsed.query) {
       parsed.query = token;
     }
@@ -103,16 +116,19 @@ Usage:
   attic sync
   attic sync --full
   attic serve
+  attic serve --sync-interval 30
+  attic worker
   attic search "query"
 
 Options:
-  --author <handle>   Search filter
-  --from <ISO>        Search from timestamp
-  --to <ISO>          Search to timestamp
-  --limit <n>         Search result limit
-  --host <host>       Serve host (default 127.0.0.1)
-  --port <port>       Serve port (default 8787)
-  --no-open           Do not auto-open browser
+  --author <handle>     Search filter
+  --from <ISO>          Search from timestamp
+  --to <ISO>            Search to timestamp
+  --limit <n>           Search result limit
+  --host <host>         Serve host (default 0.0.0.0)
+  --port <port>         Serve port (default 8787)
+  --no-open             Do not auto-open browser
+  --sync-interval <min> Auto-sync interval in minutes (serve only, default 15)
 `);
 }
 
@@ -130,6 +146,7 @@ async function runSyncCommand(parsed: ParsedArgs): Promise<void> {
     const mode = parsed.full ? "full" : "incremental";
     console.log(`Starting ${mode} sync...`);
 
+    const { runSync } = await import("./sync");
     const stats = await runSync(db, {
       full: parsed.full,
       onProgress: (message) => console.log(message),
@@ -148,6 +165,15 @@ async function runSyncCommand(parsed: ParsedArgs): Promise<void> {
 async function runServeCommand(parsed: ParsedArgs): Promise<void> {
   const db = openDatabase();
   const config = getConfig();
+
+  // Start sync worker if interval specified
+  if (parsed.syncInterval) {
+    const { startSyncWorker } = await import("./sync-worker");
+    startSyncWorker(db, {
+      intervalMinutes: parsed.syncInterval,
+    });
+  }
+
   const server = startServer(db, {
     host: parsed.host,
     port: parsed.port,
@@ -157,6 +183,9 @@ async function runServeCommand(parsed: ParsedArgs): Promise<void> {
 
   const url = `http://${server.host}:${server.port}`;
   console.log(`Attic UI running at ${url}`);
+  if (parsed.syncInterval) {
+    console.log(`Auto-sync every ${parsed.syncInterval} minutes`);
+  }
 
   await waitForShutdown();
   server.stop();
@@ -173,7 +202,9 @@ function waitForShutdown(): Promise<void> {
 
 async function runSearchCommand(parsed: ParsedArgs): Promise<void> {
   if (!parsed.query) {
-    throw new Error("Search query is required. Example: attic search \"bun sqlite\"");
+    throw new Error(
+      'Search query is required. Example: attic search "bun sqlite"',
+    );
   }
 
   const db = openDatabase();
@@ -203,6 +234,11 @@ export async function runCli(argv = Bun.argv.slice(2)): Promise<void> {
 
   if (parsed.command === "sync") {
     await runSyncCommand(parsed);
+    return;
+  }
+
+  if (parsed.command === "worker") {
+    await runSyncWorkerCli(parsed.syncInterval ?? 15);
     return;
   }
 

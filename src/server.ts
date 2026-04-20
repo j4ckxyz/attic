@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { AtticDatabase } from "./db";
 import { SearchService } from "./search";
 import type { PostRow } from "./types";
+import { getSyncStatus, runSingleSync } from "./sync-worker";
 
 const uiScript = await Bun.file(new URL("./web/app.js", import.meta.url)).text();
 
@@ -96,6 +97,20 @@ export function createApp(db: AtticDatabase, pageSize = 50): Hono {
   });
 
   app.get("/api/health", (c) => c.json({ ok: true }));
+
+  app.get("/api/sync/status", (c) => {
+    return c.json(getSyncStatus());
+  });
+
+  app.post("/api/sync/trigger", async (c) => {
+    const body = (await c.req.json()) as { full?: boolean } | undefined;
+    const stats = await runSingleSync(db, { full: body?.full });
+    if (!stats) {
+      return c.json({ error: "Sync already in progress" }, 409);
+    }
+
+    return c.json({ status: "success", stats });
+  });
 
   return app;
 }
@@ -212,6 +227,10 @@ function renderShell(): string {
         --header-end: #8a5628;
         --header-text: #fff1e2;
         --header-subtitle: #fff1e2;
+
+        --sync-ok: #4a7c59;
+        --sync-running: #c49a3c;
+        --sync-error: #b33a3a;
       }
 
       @media (prefers-color-scheme: dark) {
@@ -238,6 +257,10 @@ function renderShell(): string {
           --header-end: #7f4f26;
           --header-text: #fff0de;
           --header-subtitle: #ffe8cf;
+
+          --sync-ok: #6fb57f;
+          --sync-running: #e8c44a;
+          --sync-error: #e06060;
         }
       }
 
@@ -267,10 +290,58 @@ function renderShell(): string {
         border-radius: var(--radius-lg);
         padding: var(--space-4);
         box-shadow: 0 8px 28px rgba(58, 36, 18, 0.25);
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: var(--space-4);
       }
 
+      .header-main { flex: 1; }
       .title { margin: 0; font-size: clamp(1.25rem, 2.5vw, 1.8rem); letter-spacing: 0.02em; }
       .subtitle { margin: var(--space-1) 0 0; color: var(--header-subtitle); font-size: 0.95rem; }
+
+      .sync-status {
+        text-align: right;
+        flex-shrink: 0;
+      }
+
+      .sync-badge {
+        display: inline-block;
+        padding: var(--space-1) var(--space-2);
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        background: rgba(255, 255, 255, 0.12);
+        color: var(--header-text);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+      }
+
+      .sync-badge.sync-ok {
+        background: color-mix(in oklab, var(--sync-ok) 20%, transparent);
+        border-color: color-mix(in oklab, var(--sync-ok) 40%, transparent);
+        color: var(--header-text);
+      }
+
+      .sync-badge.sync-running {
+        background: color-mix(in oklab, var(--sync-running) 20%, transparent);
+        border-color: color-mix(in oklab, var(--sync-running) 40%, transparent);
+        color: var(--header-text);
+      }
+
+      .sync-badge.sync-error {
+        background: color-mix(in oklab, var(--sync-error) 20%, transparent);
+        border-color: color-mix(in oklab, var(--sync-error) 40%, transparent);
+        color: var(--header-text);
+      }
+
+      .sync-detail {
+        font-size: 0.72rem;
+        color: var(--header-subtitle);
+        margin-top: var(--space-1);
+        opacity: 0.8;
+      }
+
       .tabs { display: flex; gap: var(--space-2); flex-wrap: wrap; margin: var(--space-4) 0; }
 
       .panel {
@@ -314,6 +385,12 @@ function renderShell(): string {
       .bookmark:hover,
       .btn:hover {
         transform: translateY(-1px);
+      }
+
+      .feed-header {
+        padding: var(--space-2) 0 var(--space-3);
+        border-bottom: 1px solid var(--line);
+        margin-bottom: var(--space-3);
       }
 
       .post {
@@ -449,6 +526,51 @@ function renderShell(): string {
         box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent-soft), transparent 30%);
       }
 
+      .loading {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: var(--space-6);
+        gap: var(--space-3);
+      }
+
+      .loading-spinner {
+        width: 32px;
+        height: 32px;
+        border: 3px solid var(--line);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+
+      .empty-state {
+        text-align: center;
+        padding: var(--space-6) var(--space-4);
+      }
+
+      .empty-title {
+        margin: 0 0 var(--space-2);
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: var(--text);
+      }
+
+      .empty-desc {
+        margin: 0 0 var(--space-4);
+        color: var(--text-muted);
+        line-height: 1.5;
+      }
+
+      .empty-action {
+        display: flex;
+        justify-content: center;
+      }
+
       @media (prefers-reduced-motion: reduce) {
         *, *::before, *::after {
           animation-duration: 0.01ms !important;
@@ -461,14 +583,22 @@ function renderShell(): string {
       @media (max-width: 700px) {
         .shell { padding: var(--space-3); }
         .panel { padding: var(--space-3); }
+        .header { flex-direction: column; }
+        .sync-status { text-align: left; }
       }
     </style>
   </head>
   <body>
     <main class="shell">
       <header class="header">
-        <h1 class="title">Attic</h1>
-        <p class="subtitle">Your personal Bluesky archive and search desk</p>
+        <div class="header-main">
+          <h1 class="title">Attic</h1>
+          <p class="subtitle">Your personal Bluesky archive and search desk</p>
+        </div>
+        <div class="sync-status">
+          <span class="sync-badge sync-idle" id="sync-badge">Loading...</span>
+          <div class="sync-detail" id="sync-status">Checking sync status...</div>
+        </div>
       </header>
 
       <nav class="tabs" id="tabs" aria-label="Attic sections"></nav>

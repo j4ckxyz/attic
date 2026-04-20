@@ -11,11 +11,15 @@ const state = {
   threadsPage: 1,
   bookmarksPage: 1,
   searchPage: 1,
+  searchQuery: "",
+  searchFilters: { author: "", from: "", to: "" },
 };
 
 const tabsEl = document.getElementById("tabs");
 const panelEl = document.getElementById("panel");
 const statusEl = document.getElementById("ui-status");
+const syncStatusEl = document.getElementById("sync-status");
+const syncBadgeEl = document.getElementById("sync-badge");
 
 function avatar(url) {
   return (
@@ -27,6 +31,25 @@ function avatar(url) {
 function formatDate(iso) {
   try {
     return new Date(iso).toLocaleString();
+  } catch {
+    return iso;
+  }
+}
+
+function formatRelativeTime(iso) {
+  try {
+    const date = new Date(iso);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (diffMins < 1) return "just now";
+    if (diffMins < 60) return `${diffMins}m ago`;
+    if (diffHours < 24) return `${diffHours}h ago`;
+    if (diffDays < 7) return `${diffDays}d ago`;
+    return date.toLocaleDateString();
   } catch {
     return iso;
   }
@@ -77,6 +100,20 @@ function postHtml(post, depth = 0) {
   ].join("");
 }
 
+function loadingHtml(message = "Loading...") {
+  return `<div class="loading"><div class="loading-spinner" aria-hidden="true"></div><p class="muted">${message}</p></div>`;
+}
+
+function emptyStateHtml(title, description, action) {
+  return [
+    `<div class="empty-state">`,
+    `<h3 class="empty-title">${escapeHtml(title)}</h3>`,
+    `<p class="empty-desc">${escapeHtml(description)}</p>`,
+    action ? `<div class="empty-action">${action}</div>` : "",
+    `</div>`,
+  ].join("");
+}
+
 async function fetchJson(url, options) {
   const response = await fetch(url, options);
   if (!response.ok) {
@@ -87,13 +124,17 @@ async function fetchJson(url, options) {
 }
 
 function updateBookmarksInDom(uri, bookmarked) {
-  panelEl.querySelectorAll(`button.bookmark[data-uri="${CSS.escape(uri)}"]`).forEach(
-    (button) => {
+  panelEl
+    .querySelectorAll(`button.bookmark[data-uri="${CSS.escape(uri)}"]`)
+    .forEach((button) => {
       button.classList.toggle("active", bookmarked);
       button.textContent = bookmarked ? "Saved" : "Save";
       button.setAttribute("aria-pressed", bookmarked ? "true" : "false");
       const existing = button.getAttribute("aria-label") || "Toggle bookmark";
-      if (existing.includes("Remove bookmark") || existing.includes("Save bookmark")) {
+      if (
+        existing.includes("Remove bookmark") ||
+        existing.includes("Save bookmark")
+      ) {
         button.setAttribute(
           "aria-label",
           existing.replace(
@@ -102,8 +143,7 @@ function updateBookmarksInDom(uri, bookmarked) {
           ),
         );
       }
-    },
-  );
+    });
 }
 
 async function toggleBookmark(uri) {
@@ -150,55 +190,76 @@ function bindTabButtons() {
 }
 
 async function renderFeed() {
-  const data = await fetchJson(`/api/feed?page=${state.page}`);
-  if (data.items.length === 0) {
-    panelEl.innerHTML =
-      '<p class="muted">No archived posts yet. Run <code>attic sync</code>.</p>';
-    return;
+  panelEl.innerHTML = loadingHtml("Loading your archive...");
+
+  try {
+    const data = await fetchJson(`/api/feed?page=${state.page}`);
+    if (data.items.length === 0) {
+      panelEl.innerHTML = emptyStateHtml(
+        "Your archive is empty",
+        "Run a sync to start collecting posts from accounts you follow.",
+        '<button class="btn primary" id="trigger-sync">Sync now</button>',
+      );
+      panelEl.querySelector("#trigger-sync")?.addEventListener("click", () => {
+        triggerSync();
+      });
+      return;
+    }
+
+    panelEl.innerHTML = [
+      `<div class="feed-header"><span class="muted">${data.items.length} posts</span></div>`,
+      data.items.map((post) => postHtml(post)).join(""),
+      "<div class=\"row\">",
+      `<button class="btn" id="feed-prev" ${state.page <= 1 ? "disabled" : ""}>Previous</button>`,
+      '<button class="btn" id="feed-next">Next</button>',
+      "</div>",
+    ].join("");
+
+    panelEl.querySelector("#feed-prev")?.addEventListener("click", () => {
+      state.page = Math.max(1, state.page - 1);
+      render();
+    });
+    panelEl.querySelector("#feed-next")?.addEventListener("click", () => {
+      state.page += 1;
+      render();
+    });
+  } catch (error) {
+    panelEl.innerHTML = `<p class="muted">Failed to load feed: ${escapeHtml(String(error))}</p>`;
   }
-
-  panelEl.innerHTML = [
-    data.items.map((post) => postHtml(post)).join(""),
-    "<div class=\"row\">",
-    `<button class="btn" id="feed-prev" ${state.page <= 1 ? "disabled" : ""}>Previous</button>`,
-    '<button class="btn" id="feed-next">Next</button>',
-    "</div>",
-  ].join("");
-
-  panelEl.querySelector("#feed-prev")?.addEventListener("click", () => {
-    state.page = Math.max(1, state.page - 1);
-    render();
-  });
-  panelEl.querySelector("#feed-next")?.addEventListener("click", () => {
-    state.page += 1;
-    render();
-  });
 }
 
 async function renderBookmarks() {
-  const data = await fetchJson(`/api/bookmarks?page=${state.bookmarksPage}`);
-  if (data.items.length === 0) {
-    panelEl.innerHTML =
-      '<p class="muted">No bookmarks yet. Use Save on any post.</p>';
-    return;
+  panelEl.innerHTML = loadingHtml("Loading bookmarks...");
+
+  try {
+    const data = await fetchJson(`/api/bookmarks?page=${state.bookmarksPage}`);
+    if (data.items.length === 0) {
+      panelEl.innerHTML = emptyStateHtml(
+        "No bookmarks yet",
+        "Tap Save on any post to add it here.",
+      );
+      return;
+    }
+
+    panelEl.innerHTML = [
+      data.items.map((post) => postHtml(post)).join(""),
+      "<div class=\"row\">",
+      `<button class="btn" id="bm-prev" ${state.bookmarksPage <= 1 ? "disabled" : ""}>Previous</button>`,
+      '<button class="btn" id="bm-next">Next</button>',
+      "</div>",
+    ].join("");
+
+    panelEl.querySelector("#bm-prev")?.addEventListener("click", () => {
+      state.bookmarksPage = Math.max(1, state.bookmarksPage - 1);
+      render();
+    });
+    panelEl.querySelector("#bm-next")?.addEventListener("click", () => {
+      state.bookmarksPage += 1;
+      render();
+    });
+  } catch (error) {
+    panelEl.innerHTML = `<p class="muted">Failed to load bookmarks: ${escapeHtml(String(error))}</p>`;
   }
-
-  panelEl.innerHTML = [
-    data.items.map((post) => postHtml(post)).join(""),
-    "<div class=\"row\">",
-    `<button class="btn" id="bm-prev" ${state.bookmarksPage <= 1 ? "disabled" : ""}>Previous</button>`,
-    '<button class="btn" id="bm-next">Next</button>',
-    "</div>",
-  ].join("");
-
-  panelEl.querySelector("#bm-prev")?.addEventListener("click", () => {
-    state.bookmarksPage = Math.max(1, state.bookmarksPage - 1);
-    render();
-  });
-  panelEl.querySelector("#bm-next")?.addEventListener("click", () => {
-    state.bookmarksPage += 1;
-    render();
-  });
 }
 
 function flattenThread(nodes, depth = 0, out = []) {
@@ -211,77 +272,87 @@ function flattenThread(nodes, depth = 0, out = []) {
 }
 
 async function renderThreads() {
-  const data = await fetchJson(`/api/threads?page=${state.threadsPage}`);
-  if (data.items.length === 0) {
-    panelEl.innerHTML =
-      '<p class="muted">No followed threads yet. Sync more data first.</p>';
-    return;
-  }
+  panelEl.innerHTML = loadingHtml("Loading threads...");
 
-  const cards = data.items
-    .map((item) => {
-      const preview = item.rootPost
-        ? postHtml(item.rootPost)
-        : '<p class="muted">Root post not in archive.</p>';
-      const rootUri = escapeHtml(item.threadRootUri);
-      const chainId = `thread-chain-${encodeURIComponent(item.threadRootUri).replaceAll("%", "-")}`;
-
-      return [
-        `<section class="thread-card" data-root="${rootUri}">`,
-        '<header class="thread-head">',
-        `<div><strong>${item.participantCount} followed participants</strong><div class="meta">Last activity: ${escapeHtml(formatDate(item.lastPostAt))}</div></div>`,
-        `<button class="btn" data-action="expand" aria-expanded="false" aria-controls="${chainId}">Expand chain</button>`,
-        "</header>",
-        `<div class="thread-body">${preview}<div id="${chainId}" data-chain hidden></div></div>`,
-        "</section>",
-      ].join("");
-    })
-    .join("");
-
-  panelEl.innerHTML =
-    cards +
-    [
-      "<div class=\"row\">",
-      `<button class="btn" id="th-prev" ${state.threadsPage <= 1 ? "disabled" : ""}>Previous</button>`,
-      '<button class="btn" id="th-next">Next</button>',
-      "</div>",
-    ].join("");
-
-  panelEl.querySelectorAll("button[data-action='expand']").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const card = button.closest(".thread-card");
-      const rootUri = card.dataset.root;
-      const chainEl = card.querySelector("[data-chain]");
-
-      if (!chainEl.hidden) {
-        chainEl.hidden = true;
-        button.textContent = "Expand chain";
-        button.setAttribute("aria-expanded", "false");
-        return;
-      }
-
-      const thread = await fetchJson(
-        `/api/thread?rootUri=${encodeURIComponent(rootUri)}`,
+  try {
+    const data = await fetchJson(`/api/threads?page=${state.threadsPage}`);
+    if (data.items.length === 0) {
+      panelEl.innerHTML = emptyStateHtml(
+        "No followed threads yet",
+        "Threads with 3+ followed participants will appear here after syncing.",
       );
-      const flattened = flattenThread(thread.tree || []);
-      chainEl.innerHTML = flattened
-        .map(({ post, depth }) => postHtml(post, depth))
-        .join("");
-      chainEl.hidden = false;
-      button.textContent = "Collapse";
-      button.setAttribute("aria-expanded", "true");
-      bindBookmarkButtons();
-    });
-  });
+      return;
+    }
 
-  panelEl.querySelector("#th-prev")?.addEventListener("click", () => {
-    state.threadsPage = Math.max(1, state.threadsPage - 1);
-    render();
-  });
-  panelEl.querySelector("#th-next")?.addEventListener("click", () => {
-    state.threadsPage += 1;
-    render();
-  });
+    const cards = data.items
+      .map((item) => {
+        const preview = item.rootPost
+          ? postHtml(item.rootPost)
+          : '<p class="muted">Root post not in archive.</p>';
+        const rootUri = escapeHtml(item.threadRootUri);
+        const chainId = `thread-chain-${encodeURIComponent(item.threadRootUri).replaceAll("%", "-")}`;
+
+        return [
+          `<section class="thread-card" data-root="${rootUri}">`,
+          '<header class="thread-head">',
+          `<div><strong>${item.participantCount} participants</strong><div class="meta">Last activity: ${escapeHtml(formatRelativeTime(item.lastPostAt))}</div></div>`,
+          `<button class="btn" data-action="expand" aria-expanded="false" aria-controls="${chainId}">Expand</button>`,
+          "</header>",
+          `<div class="thread-body">${preview}<div id="${chainId}" data-chain hidden></div></div>`,
+          "</section>",
+        ].join("");
+      })
+      .join("");
+
+    panelEl.innerHTML =
+      cards +
+      [
+        "<div class=\"row\">",
+        `<button class="btn" id="th-prev" ${state.threadsPage <= 1 ? "disabled" : ""}>Previous</button>`,
+        '<button class="btn" id="th-next">Next</button>',
+        "</div>",
+      ].join("");
+
+    panelEl
+      .querySelectorAll("button[data-action='expand']")
+      .forEach((button) => {
+        button.addEventListener("click", async () => {
+          const card = button.closest(".thread-card");
+          const rootUri = card.dataset.root;
+          const chainEl = card.querySelector("[data-chain]");
+
+          if (!chainEl.hidden) {
+            chainEl.hidden = true;
+            button.textContent = "Expand";
+            button.setAttribute("aria-expanded", "false");
+            return;
+          }
+
+          const thread = await fetchJson(
+            `/api/thread?rootUri=${encodeURIComponent(rootUri)}`,
+          );
+          const flattened = flattenThread(thread.tree || []);
+          chainEl.innerHTML = flattened
+            .map(({ post, depth }) => postHtml(post, depth))
+            .join("");
+          chainEl.hidden = false;
+          button.textContent = "Collapse";
+          button.setAttribute("aria-expanded", "true");
+          bindBookmarkButtons();
+        });
+      });
+
+    panelEl.querySelector("#th-prev")?.addEventListener("click", () => {
+      state.threadsPage = Math.max(1, state.threadsPage - 1);
+      render();
+    });
+    panelEl.querySelector("#th-next")?.addEventListener("click", () => {
+      state.threadsPage += 1;
+      render();
+    });
+  } catch (error) {
+    panelEl.innerHTML = `<p class="muted">Failed to load threads: ${escapeHtml(String(error))}</p>`;
+  }
 }
 
 function buildSearchControls() {
@@ -320,15 +391,21 @@ function serializeSearchFilters(formData) {
 }
 
 async function executeSearch(form, resultsEl) {
+  resultsEl.innerHTML = loadingHtml("Searching...");
+
   const params = serializeSearchFilters(new FormData(form));
   const data = await fetchJson(`/api/search?${params.toString()}`);
 
   if (data.items.length === 0) {
-    resultsEl.innerHTML = '<p class="muted">No matches found.</p>';
+    resultsEl.innerHTML = emptyStateHtml(
+      "No matches found",
+      "Try different keywords or adjust your filters.",
+    );
     return;
   }
 
   resultsEl.innerHTML = [
+    `<div class="feed-header"><span class="muted">${data.items.length} results for "${escapeHtml(data.query)}"</span></div>`,
     data.items.map((post) => postHtml(post)).join(""),
     '<div class="row">',
     `<button class="btn" id="search-prev" ${state.searchPage <= 1 ? "disabled" : ""}>Previous</button>`,
@@ -362,6 +439,68 @@ async function renderSearch() {
   });
 }
 
+async function updateSyncStatus() {
+  if (!syncStatusEl || !syncBadgeEl) {
+    return;
+  }
+
+  try {
+    const data = await fetchJson("/api/sync/status");
+
+    if (data.inProgress) {
+      syncBadgeEl.className = "sync-badge sync-running";
+      syncBadgeEl.textContent = "Syncing...";
+      syncStatusEl.textContent = "Sync in progress";
+    } else if (data.status === "error") {
+      syncBadgeEl.className = "sync-badge sync-error";
+      syncBadgeEl.textContent = "Error";
+      syncStatusEl.textContent = `Last sync failed: ${data.lastError || "unknown error"}`;
+    } else if (data.lastSyncStats) {
+      syncBadgeEl.className = "sync-badge sync-ok";
+      const stats = data.lastSyncStats;
+      syncBadgeEl.textContent = `${stats.followsCount} followed`;
+      syncStatusEl.textContent = `Last sync: ${stats.repoPostsSaved} repo posts, ${stats.timelinePostsSaved} timeline posts, ${stats.followedThreadsFound} threads`;
+    } else {
+      syncBadgeEl.className = "sync-badge sync-idle";
+      syncBadgeEl.textContent = "Never synced";
+      syncStatusEl.textContent = "Run a sync to get started";
+    }
+  } catch {
+    // Sync status endpoint may not exist on older servers
+  }
+}
+
+async function triggerSync(full = false) {
+  if (!syncBadgeEl) {
+    return;
+  }
+
+  syncBadgeEl.className = "sync-badge sync-running";
+  syncBadgeEl.textContent = "Syncing...";
+  announce("Sync started.");
+
+  try {
+    const data = await fetchJson("/api/sync/trigger", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ full }),
+    });
+
+    if (data.status === "success") {
+      syncBadgeEl.className = "sync-badge sync-ok";
+      syncBadgeEl.textContent = `${data.stats.followsCount} followed`;
+      announce(`Sync complete: ${data.stats.repoPostsSaved} repo posts, ${data.stats.timelinePostsSaved} timeline posts`);
+    }
+  } catch (error) {
+    syncBadgeEl.className = "sync-badge sync-error";
+    syncBadgeEl.textContent = "Error";
+    announce(`Sync failed: ${String(error)}`);
+  }
+
+  // Refresh current view after sync
+  setTimeout(() => render(), 500);
+}
+
 async function render() {
   bindTabButtons();
 
@@ -376,9 +515,14 @@ async function render() {
   }
 
   bindBookmarkButtons();
+  await updateSyncStatus();
 }
 
+// Initial render
 render().catch((error) => {
   panelEl.innerHTML = `<p class="muted">Failed to load this view. ${escapeHtml(String(error))}</p>`;
   announce("Failed to load view.");
 });
+
+// Poll sync status every 30 seconds
+setInterval(updateSyncStatus, 30000);
