@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  attic:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: attic
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      - attic-data:/app/data
+    env_file:
+      - .env
+    environment:
+      - ATTIC_DB_PATH=/app/data/attic.db
+      - PORT=8787
+      - HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "bun", "run", "src/cli.ts", "search", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  attic-data:
+    driver: local

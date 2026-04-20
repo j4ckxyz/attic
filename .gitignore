@@ -22,6 +22,11 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .env.production.local
 .env.local
 
+# SQLite database
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
 # caches
 .eslintcache
 .cache
